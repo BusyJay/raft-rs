@@ -82,7 +82,7 @@ impl Unstable {
                     } else {
                         None
                     }
-                },
+                }
                 None => None,
             }
         } else {

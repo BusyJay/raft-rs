@@ -25,10 +25,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::cmp;
-use std::iter::Chain;
-use std::collections::hash_map::{HashMap, Iter, IterMut};
 use fxhash::FxHashMap;
+use std::cmp;
+use std::collections::hash_map::{HashMap, Iter, IterMut};
+use std::iter::Chain;
 
 #[derive(Debug, PartialEq, Clone, Copy)]
 pub enum ProgressState {
