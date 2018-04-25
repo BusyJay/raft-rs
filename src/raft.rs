@@ -713,6 +713,10 @@ impl<T: Storage> Raft<T> {
         self.heartbeat_elapsed += 1;
         self.election_elapsed += 1;
 
+        if self.election_elapsed < self.election_timeout && self.heartbeat_elapsed < self.heartbeat_timeout {
+            return false;
+        }
+
         let mut has_ready = false;
         if self.election_elapsed >= self.election_timeout {
             self.election_elapsed = 0;
@@ -872,8 +876,8 @@ impl<T: Storage> Raft<T> {
     pub fn step(&mut self, m: Message) -> Result<()> {
         // Handle the message term, which may result in our stepping down to a follower.
 
-        if m.get_term() == 0 {
-            // local message
+        if m.get_term() == self.term || m.get_term() == 0 {
+            // Normal messages and local messages
         } else if m.get_term() > self.term {
             if m.get_msg_type() == MessageType::MsgRequestVote
                 || m.get_msg_type() == MessageType::MsgRequestPreVote
@@ -935,7 +939,7 @@ impl<T: Storage> Raft<T> {
                     self.become_follower(m.get_term(), INVALID_ID);
                 }
             }
-        } else if m.get_term() < self.term {
+        } else {
             if self.check_quorum
                 && (m.get_msg_type() == MessageType::MsgHeartbeat
                     || m.get_msg_type() == MessageType::MsgAppend)
@@ -1062,9 +1066,9 @@ impl<T: Storage> Raft<T> {
                 }
             }
             _ => match self.state {
-                StateRole::PreCandidate | StateRole::Candidate => self.step_candidate(m)?,
                 StateRole::Follower => self.step_follower(m)?,
                 StateRole::Leader => self.step_leader(m)?,
+                StateRole::PreCandidate | StateRole::Candidate => self.step_candidate(m)?,
             },
         }
 

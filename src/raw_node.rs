@@ -25,8 +25,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::mem;
-
 use protobuf::{self, RepeatedField};
 use eraftpb::{ConfChange, ConfChangeType, ConfState, Entry, EntryType, HardState,
                        Message, MessageType, Snapshot};
@@ -131,7 +129,7 @@ impl Ready {
             ..Default::default()
         };
         if !raft.msgs.is_empty() {
-            mem::swap(&mut raft.msgs, &mut rd.messages);
+            rd.messages = raft.msgs.drain(..).collect();
         }
         rd.committed_entries = Some(
             (match since_idx {
