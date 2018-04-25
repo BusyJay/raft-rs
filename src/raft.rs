@@ -572,7 +572,7 @@ impl<T: Storage> Raft<T> {
     }
 
     // send_heartbeat sends an empty MsgAppend
-    fn send_heartbeat(&mut self, to: u64, pr: &Progress, ctx: Option<Vec<u8>>) {
+    fn send_heartbeat(&mut self, to: u64, pr: &Progress, ctx: &Option<Vec<u8>>) {
         // Attach the commit as min(to.matched, self.raft_log.committed).
         // When the leader sends out heartbeat message,
         // the receiver(follower) might not be matched with the leader
@@ -584,8 +584,8 @@ impl<T: Storage> Raft<T> {
         m.set_msg_type(MessageType::MsgHeartbeat);
         let commit = cmp::min(pr.matched, self.raft_log.committed);
         m.set_commit(commit);
-        if let Some(context) = ctx {
-            m.set_context(context);
+        if let Some(ref context) = *ctx {
+            m.set_context(context.clone());
         }
         self.send(m);
     }
@@ -604,17 +604,17 @@ impl<T: Storage> Raft<T> {
     // bcast_heartbeat sends RPC, without entries to all the peers.
     pub fn bcast_heartbeat(&mut self) {
         let ctx = self.read_only.last_pending_request_ctx();
-        self.bcast_heartbeat_with_ctx(ctx)
+        self.bcast_heartbeat_with_ctx(&ctx)
     }
 
-    pub fn bcast_heartbeat_with_ctx(&mut self, ctx: Option<Vec<u8>>) {
+    pub fn bcast_heartbeat_with_ctx(&mut self, ctx: &Option<Vec<u8>>) {
         let self_id = self.id;
         let mut prs = self.take_prs();
         for (id, pr) in prs.iter_mut() {
             if *id == self_id {
                 continue;
             }
-            self.send_heartbeat(*id, pr, ctx.clone());
+            self.send_heartbeat(*id, pr, &ctx);
         }
         self.set_prs(prs);
     }
@@ -740,8 +740,7 @@ impl<T: Storage> Raft<T> {
         if self.heartbeat_elapsed >= self.heartbeat_timeout {
             self.heartbeat_elapsed = 0;
             has_ready = true;
-            let m = new_message(INVALID_ID, MessageType::MsgBeat, Some(self.id));
-            self.step(m).is_ok();
+            self.bcast_heartbeat();
         }
         has_ready
     }
@@ -1435,7 +1434,7 @@ impl<T: Storage> Raft<T> {
                         ReadOnlyOption::Safe => {
                             let ctx = m.get_entries()[0].get_data().to_vec();
                             self.read_only.add_request(self.raft_log.committed, m);
-                            self.bcast_heartbeat_with_ctx(Some(ctx));
+                            self.bcast_heartbeat_with_ctx(&Some(ctx));
                         }
                         ReadOnlyOption::LeaseBased => {
                             let mut read_index = INVALID_INDEX;
