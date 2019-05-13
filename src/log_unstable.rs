@@ -30,6 +30,10 @@
 use eraftpb::{Entry, Snapshot};
 use std::collections::VecDeque;
 
+// One extra slot for VecDeque internal usage.
+const MAX_CACHE_CAPACITY: usize = 1024 - 1;
+const SHRINK_CACHE_CAPACITY: usize = 64;
+
 /// The unstable.entries[i] has raft log position i+unstable.offset.
 /// Note that unstable.offset may be less than the highest log
 /// position in storage; this means that the next write to storage
@@ -40,7 +44,7 @@ pub struct Unstable {
     pub snapshot: Option<Snapshot>,
 
     /// All entries that have not yet been written to storage.
-    pub entries: VecDeque<Entry>,
+    entries: VecDeque<Entry>,
 
     /// The offset from the vector index.
     offset: u64,
@@ -111,6 +115,9 @@ impl Unstable {
 
         if t.unwrap() == term && idx >= self.stable_index {
             self.stable_index = idx + 1;
+            if self.entries.capacity() > MAX_CACHE_CAPACITY {
+                self.maybe_compact();
+            }
         }
     }
 
@@ -134,6 +141,16 @@ impl Unstable {
         self.offset
     }
 
+    fn maybe_compact(&mut self) {
+        if self.entries.len() < MAX_CACHE_CAPACITY {
+            return;
+        }
+        let index = self.offset + self.entries.len() as u64 - MAX_CACHE_CAPACITY as u64;
+        if index < self.stable_index {
+            self.compact_to(index);
+        }
+    }
+
     /// TODO
     pub fn compact_to(&mut self, idx: u64) {
         if idx >= self.stable_index {
@@ -144,6 +161,9 @@ impl Unstable {
         }
         self.entries.drain(..(idx - self.offset) as usize);
         self.offset = idx;
+        if self.entries.len() < SHRINK_CACHE_CAPACITY && self.entries.capacity() > SHRINK_CACHE_CAPACITY {
+            self.entries.shrink_to_fit();
+        }
     }
 
     /// Stable all entries.
@@ -164,6 +184,9 @@ impl Unstable {
     /// From a given snapshot, restores the snapshot to self, but doesn't unpack.
     pub fn restore(&mut self, snap: Snapshot) {
         self.entries.clear();
+        if self.entries.capacity() > SHRINK_CACHE_CAPACITY {
+            self.entries = VecDeque::new();
+        }
         self.offset = snap.get_metadata().get_index() + 1;
         self.stable_index = self.offset;
         self.snapshot = Some(snap);
@@ -189,6 +212,9 @@ impl Unstable {
             self.entries.extend(ents.drain(index..));
         } else {
             panic!("{} unexpected log gap: {} > {}", self.tag, after, last_index);
+        }
+        if self.entries.len() > MAX_CACHE_CAPACITY {
+            self.maybe_compact();
         }
     }
 
