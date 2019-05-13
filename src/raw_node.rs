@@ -115,7 +115,7 @@ pub struct Ready {
 
     /// Entries specifies entries to be saved to stable storage BEFORE
     /// Messages are sent.
-    pub has_unstable: bool,
+    pub unstable_count: usize,
 
     /// Snapshot specifies the snapshot to be saved to stable storage.
     pub snapshot: Snapshot,
@@ -144,7 +144,7 @@ impl Ready {
         since_idx: Option<u64>,
     ) -> Ready {
         let mut rd = Ready {
-            has_unstable: raft.raft_log.unstable_entries().is_some(),
+            unstable_count: raft.raft_log.unstable_entries().map_or(0, |e| e.len()),
             ..Default::default()
         };
         if !raft.msgs.is_empty() {
@@ -239,7 +239,7 @@ impl<T: Storage> RawNode<T> {
                 self.prev_hs = e;
             }
         }
-        if rd.has_unstable {
+        if rd.unstable_count > 0 {
             self.raft.raft_log.stable_all();
         }
         if rd.snapshot != Snapshot::new() {
