@@ -144,7 +144,7 @@ impl Ready {
         since_idx: Option<u64>,
     ) -> Ready {
         let mut rd = Ready {
-            unstable_count: raft.raft_log.unstable_entries().map_or(0, |e| e.len()),
+            unstable_count: raft.raft_log.unstable_entries().map_or(0, |(l, r)| l.len() + r.len()),
             ..Default::default()
         };
         if !raft.msgs.is_empty() {
@@ -215,8 +215,8 @@ impl<T: Storage> RawNode<T> {
                 e.set_data(data);
                 ents.push(e);
             }
-            rn.raft.raft_log.append(&ents);
             rn.raft.raft_log.committed = ents.len() as u64;
+            rn.raft.raft_log.append(ents, 0);
             for peer in peers {
                 rn.raft.add_node(peer.id);
             }

@@ -28,6 +28,7 @@
 // limitations under the License.
 
 use eraftpb::{Entry, Snapshot};
+use std::collections::VecDeque;
 
 /// The unstable.entries[i] has raft log position i+unstable.offset.
 /// Note that unstable.offset may be less than the highest log
@@ -39,10 +40,11 @@ pub struct Unstable {
     pub snapshot: Option<Snapshot>,
 
     /// All entries that have not yet been written to storage.
-    pub entries: Vec<Entry>,
+    pub entries: VecDeque<Entry>,
 
     /// The offset from the vector index.
-    pub offset: u64,
+    offset: u64,
+    stable_index: u64,
 
     /// The tag to use when logging.
     pub tag: String,
@@ -53,8 +55,9 @@ impl Unstable {
     pub fn new(offset: u64, tag: String) -> Unstable {
         Unstable {
             offset,
+            stable_index: offset,
             snapshot: None,
-            entries: vec![],
+            entries: VecDeque::default(),
             tag,
         }
     }
@@ -106,17 +109,46 @@ impl Unstable {
             return;
         }
 
-        if t.unwrap() == term && idx >= self.offset {
-            let start = idx + 1 - self.offset;
-            self.entries.drain(..start as usize);
-            self.offset = idx + 1;
+        if t.unwrap() == term && idx >= self.stable_index {
+            self.stable_index = idx + 1;
         }
+    }
+
+    /// TODO
+    pub fn unstable_offset(&self) -> u64 {
+        self.stable_index
+    }
+
+    /// TODO
+    pub fn unstable_len(&self) -> usize {
+        self.entries.len() - (self.stable_index - self.offset) as usize
+    }
+
+    /// TODO
+    pub fn unstable_entries(&self) -> (&[Entry], &[Entry]) {
+        self.slice(self.stable_index, self.offset + self.entries.len() as u64)
+    }
+
+    /// TODO
+    pub fn offset(&self) -> u64 {
+        self.offset
+    }
+
+    /// TODO
+    pub fn compact_to(&mut self, idx: u64) {
+        if idx >= self.stable_index {
+            panic!("{} unstable logs should not be cleared: {} >= {}", self.tag, idx, self.stable_index);
+        }
+        if self.offset >= idx {
+            return;
+        }
+        self.entries.drain(..(idx - self.offset) as usize);
+        self.offset = idx;
     }
 
     /// Stable all entries.
     pub fn stable_all(&mut self) {
-        self.offset += self.entries.len() as u64;
-        self.entries.clear();
+        self.stable_index = self.offset + self.entries.len() as u64;
     }
 
     /// Removes the snapshot from self if the index of the snapshot matches
@@ -133,27 +165,30 @@ impl Unstable {
     pub fn restore(&mut self, snap: Snapshot) {
         self.entries.clear();
         self.offset = snap.get_metadata().get_index() + 1;
+        self.stable_index = self.offset;
         self.snapshot = Some(snap);
     }
 
     /// Append entries to unstable, truncate local block first if overlapped.
-    pub fn truncate_and_append(&mut self, ents: &[Entry]) {
-        let after = ents[0].get_index();
-        if after == self.offset + self.entries.len() as u64 {
+    pub fn truncate_and_append(&mut self, mut ents: Vec<Entry>, index: usize) {
+        let after = ents[index].get_index();
+        let last_index = self.offset + self.entries.len() as u64;
+        if after == last_index {
             // after is the next index in the self.entries, append directly
-            self.entries.extend_from_slice(ents);
+            self.entries.extend(ents.drain(index..));
         } else if after <= self.offset {
             // The log is being truncated to before our current offset
             // portion, so set the offset and replace the entries
             self.offset = after;
+            self.stable_index = after;
             self.entries.clear();
-            self.entries.extend_from_slice(ents);
-        } else {
+            self.entries.extend(ents.drain(index..));
+        } else if after < last_index {
             // truncate to after and copy to self.entries then append
-            let off = self.offset;
-            self.must_check_outofbounds(off, after);
-            self.entries.truncate((after - off) as usize);
-            self.entries.extend_from_slice(ents);
+            self.entries.truncate((after - self.offset) as usize);
+            self.entries.extend(ents.drain(index..));
+        } else {
+            panic!("{} unexpected log gap: {} > {}", self.tag, after, last_index);
         }
     }
 
@@ -163,12 +198,20 @@ impl Unstable {
     ///
     /// Panics if the `lo` or `hi` are out of bounds.
     /// Panics if `lo > hi`.
-    pub fn slice(&self, lo: u64, hi: u64) -> &[Entry] {
+    pub fn slice(&self, lo: u64, hi: u64) -> (&[Entry], &[Entry]) {
         self.must_check_outofbounds(lo, hi);
-        let l = lo as usize;
-        let h = hi as usize;
-        let off = self.offset as usize;
-        &self.entries[l - off..h - off]
+        let l = (lo - self.offset) as usize;
+        let h = (hi - self.offset) as usize;
+        let (left, right) = self.entries.as_slices();
+        if left.len() > l {
+            if left.len() >= h {
+                (&left[l..h], &[])
+            } else {
+                (&left[l..], &right[..h - left.len()])
+            }
+        } else {
+            (&right[l - left.len()..h - left.len()], &[])
+        }
     }
 
     /// Asserts the `hi` and `lo` values against each other and against the
@@ -189,6 +232,7 @@ impl Unstable {
 
 #[cfg(test)]
 mod test {
+    use std::collections::VecDeque;
     use eraftpb::{Entry, Snapshot, SnapshotMetadata};
     use log_unstable::Unstable;
     use setup_for_test;
@@ -223,8 +267,10 @@ mod test {
         ];
 
         for (entries, offset, snapshot, wok, windex) in tests {
+            let mut ent = VecDeque::new();
+            entries.map(|e| ent.push_back(e));
             let u = Unstable {
-                entries: entries.map_or(vec![], |entry| vec![entry]),
+                entries: ent,
                 offset,
                 snapshot,
                 ..Default::default()
@@ -251,8 +297,10 @@ mod test {
         ];
 
         for (entries, offset, snapshot, wok, windex) in tests {
+            let mut ent = VecDeque::new();
+            entries.map(|e| ent.push_back(e));
             let u = Unstable {
-                entries: entries.map_or(vec![], |entry| vec![entry]),
+                entries: ent,
                 offset,
                 snapshot,
                 ..Default::default()
@@ -313,8 +361,10 @@ mod test {
         ];
 
         for (entries, offset, snapshot, index, wok, wterm) in tests {
+            let mut ent = VecDeque::new();
+            entries.map(|e| ent.push_back(e));
             let u = Unstable {
-                entries: entries.map_or(vec![], |entry| vec![entry]),
+                entries: ent,
                 offset,
                 snapshot,
                 ..Default::default()
@@ -330,8 +380,10 @@ mod test {
     #[test]
     fn test_restore() {
         setup_for_test();
+        let mut ent = VecDeque::new();
+        ent.push_back(new_entry(5, 1));
         let mut u = Unstable {
-            entries: vec![new_entry(5, 1)],
+            entries: ent,
             offset: 5,
             snapshot: Some(new_snapshot(4, 1)),
             ..Default::default()
@@ -413,8 +465,10 @@ mod test {
         ];
 
         for (entries, offset, snapshot, index, term, woffset, wlen) in tests {
+            let mut ent = VecDeque::new();
+            ent.extend(entries);
             let mut u = Unstable {
-                entries,
+                entries: ent,
                 offset,
                 snapshot,
                 ..Default::default()
@@ -481,13 +535,15 @@ mod test {
         ];
 
         for (entries, offset, snapshot, to_append, woffset, wentries) in tests {
+            let mut ent = VecDeque::new();
+            ent.extend(entries);
             let mut u = Unstable {
-                entries,
+                entries: ent,
                 offset,
                 snapshot,
                 ..Default::default()
             };
-            u.truncate_and_append(&to_append);
+            u.truncate_and_append(to_append);
             assert_eq!(u.offset, woffset);
             assert_eq!(u.entries, wentries);
         }

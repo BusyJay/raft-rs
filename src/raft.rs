@@ -641,14 +641,14 @@ impl<T: Storage> Raft<T> {
 
     /// Appends a slice of entries to the log. The entries are updated to match
     /// the current index and term.
-    pub fn append_entry(&mut self, es: &mut [Entry]) {
+    pub fn append_entry(&mut self, mut es: Vec<Entry>) {
         let mut li = self.raft_log.last_index();
         for (i, e) in es.iter_mut().enumerate() {
             e.set_term(self.term);
             e.set_index(li + 1 + i as u64);
         }
         // use latest "last" index after truncate/append
-        li = self.raft_log.append(es);
+        li = self.raft_log.append(es, 0);
 
         let self_id = self.id;
         self.mut_prs().get_mut(self_id).unwrap().maybe_update(li);
@@ -679,7 +679,7 @@ impl<T: Storage> Raft<T> {
 
         self.election_elapsed = 0;
         let m = new_message(INVALID_ID, MessageType::MsgHup, Some(self.id));
-        let _ = self.step(m);
+        self.step(m).is_ok();
         true
     }
 
@@ -695,7 +695,7 @@ impl<T: Storage> Raft<T> {
             if self.check_quorum {
                 let m = new_message(INVALID_ID, MessageType::MsgCheckQuorum, Some(self.id));
                 has_ready = true;
-                let _ = self.step(m);
+                self.step(m).is_ok();
             }
             if self.state == StateRole::Leader && self.lead_transferee.is_some() {
                 self.abort_leader_transfer()
@@ -710,7 +710,7 @@ impl<T: Storage> Raft<T> {
             self.heartbeat_elapsed = 0;
             has_ready = true;
             let m = new_message(INVALID_ID, MessageType::MsgBeat, Some(self.id));
-            let _ = self.step(m);
+            self.step(m).is_ok();
         }
         has_ready
     }
@@ -789,12 +789,12 @@ impl<T: Storage> Raft<T> {
         // could be expensive.
         self.pending_conf_index = self.raft_log.last_index();
 
-        self.append_entry(&mut [Entry::new()]);
+        self.append_entry(vec![Entry::new()]);
         info!("{} became leader at term {}", self.tag, self.term);
     }
 
     fn num_pending_conf(&self, ents: &[Entry]) -> usize {
-        ents.iter()
+        ents.into_iter()
             .filter(|e| e.get_entry_type() == EntryType::EntryConfChange)
             .count()
     }
@@ -1441,7 +1441,7 @@ impl<T: Storage> Raft<T> {
                         }
                     }
                 }
-                self.append_entry(&mut m.mut_entries());
+                self.append_entry(m.take_entries().into_vec());
                 self.bcast_append();
                 return Ok(());
             }
@@ -1486,23 +1486,11 @@ impl<T: Storage> Raft<T> {
                         }
                     }
                 } else {
-                    // there is only one voting member (the leader) in the cluster
-                    if m.get_from() == INVALID_ID || m.get_from() == self.id {
-                        // from leader itself
-                        let rs = ReadState {
-                            index: self.raft_log.committed,
-                            request_ctx: m.take_entries()[0].take_data(),
-                        };
-                        self.read_states.push(rs);
-                    } else {
-                        // from learner member
-                        let mut to_send = Message::default();
-                        to_send.set_to(m.get_from());
-                        to_send.set_msg_type(MessageType::MsgReadIndexResp);
-                        to_send.set_index(self.raft_log.committed);
-                        to_send.set_entries(m.take_entries());
-                        self.send(to_send);
-                    }
+                    let rs = ReadState {
+                        index: self.raft_log.committed,
+                        request_ctx: m.take_entries()[0].take_data(),
+                    };
+                    self.read_states.push(rs);
                 }
                 return Ok(());
             }
@@ -1559,7 +1547,7 @@ impl<T: Storage> Raft<T> {
             MessageType::MsgAppend => {
                 debug_assert_eq!(self.term, m.get_term());
                 self.become_follower(m.get_term(), m.get_from());
-                self.handle_append_entries(&m);
+                self.handle_append_entries(m);
             }
             MessageType::MsgHeartbeat => {
                 debug_assert_eq!(self.term, m.get_term());
@@ -1634,7 +1622,7 @@ impl<T: Storage> Raft<T> {
             MessageType::MsgAppend => {
                 self.election_elapsed = 0;
                 self.leader_id = m.get_from();
-                self.handle_append_entries(&m);
+                self.handle_append_entries(m);
             }
             MessageType::MsgHeartbeat => {
                 self.election_elapsed = 0;
@@ -1712,7 +1700,7 @@ impl<T: Storage> Raft<T> {
 
     // TODO: revoke pub when there is a better way to test.
     /// For a given message, append the entries to the log.
-    pub fn handle_append_entries(&mut self, m: &Message) {
+    pub fn handle_append_entries(&mut self, mut m: Message) {
         if m.get_index() < self.raft_log.committed {
             let mut to_send = Message::new();
             to_send.set_to(m.get_from());
@@ -1728,7 +1716,7 @@ impl<T: Storage> Raft<T> {
             m.get_index(),
             m.get_log_term(),
             m.get_commit(),
-            m.get_entries(),
+            m.take_entries().into_vec(),
         ) {
             Some(mlast_index) => {
                 to_send.set_index(mlast_index);
