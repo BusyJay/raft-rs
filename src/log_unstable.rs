@@ -113,6 +113,12 @@ impl Unstable {
         }
     }
 
+    /// Stable all entries.
+    pub fn stable_all(&mut self) {
+        self.offset += self.entries.len() as u64;
+        self.entries.clear();
+    }
+
     /// Removes the snapshot from self if the index of the snapshot matches
     pub fn stable_snap_to(&mut self, idx: u64) {
         if self.snapshot.is_none() {

@@ -94,7 +94,7 @@ fn next_ents(r: &mut Raft<MemStorage>, s: &MemStorage) -> Vec<Entry> {
     let ents = r.raft_log.next_entries();
     let committed = r.raft_log.committed;
     r.raft_log.applied_to(committed);
-    ents.unwrap_or_else(Vec::new)
+    ents.map_or_else(Vec::new, |s| r.raft_log.slice(s.start, s.end, raft::NO_LIMIT).unwrap())
 }
 
 fn do_send_append(raft: &mut Raft<MemStorage>, to: u64) {

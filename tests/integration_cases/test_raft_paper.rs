@@ -491,7 +491,7 @@ fn test_leader_commit_entry() {
 
     assert_eq!(r.raft_log.committed, li + 1);
     let wents = vec![new_entry(1, li + 1, SOME_DATA)];
-    assert_eq!(r.raft_log.next_entries(), Some(wents));
+    assert_eq!(r.raft_log.next_entries(), Some(Slice::new(li + 1, li + 2)));
     let mut msgs = r.read_messages();
     msgs.sort_by_key(|m| format!("{:?}", m));
     for (i, m) in msgs.drain(..).enumerate() {
@@ -576,8 +576,8 @@ fn test_leader_commit_preceding_entries() {
             new_entry(3, li + 2, SOME_DATA),
         ]);
         let g = r.raft_log.next_entries();
-        let wg = Some(tt);
-        if g != wg {
+        let wg = Slice::new(tt[0].get_index(), tt.last().unwrap().get_index() + 1);
+        if g != Some(wg) {
             panic!("#{}: ents = {:?}, want {:?}", i, g, wg);
         }
     }
@@ -632,7 +632,8 @@ fn test_follower_commit_entry() {
         }
         let wents = Some(ents[..commit as usize].to_vec());
         let g = r.raft_log.next_entries();
-        if g != wents {
+        let wg = Slice::new(ents[0].get_index(), ents[commit as usize].get_index() + 1);
+        if g != Some(wg) {
             panic!("#{}: next_ents = {:?}, want {:?}", i, g, wents);
         }
     }

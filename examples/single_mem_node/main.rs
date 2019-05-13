@@ -134,9 +134,10 @@ fn on_ready(r: &mut RawNode<MemStorage>, cbs: &mut HashMap<u8, ProposeCallback>)
             .unwrap();
     }
 
-    if !ready.entries.is_empty() {
+    if ready.has_unstable {
         // Append entries to the Raft log
-        r.mut_store().wl().append(&ready.entries).unwrap();
+        let entries = r.raft.raft_log.unstable_entries().unwrap();
+        r.raft.raft_log.store.wl().append(entries).unwrap();
     }
 
     if let Some(ref hs) = ready.hs {
@@ -153,9 +154,9 @@ fn on_ready(r: &mut RawNode<MemStorage>, cbs: &mut HashMap<u8, ProposeCallback>)
         }
     }
 
-    if let Some(committed_entries) = ready.committed_entries.take() {
+    if let Some(s) = ready.committed_entries.take() {
         let mut _last_apply_index = 0;
-        for entry in committed_entries {
+        for entry in r.raft.raft_log.slice(s.start, s.end, raft::NO_LIMIT).unwrap() {
             // Mostly, you need to save the last apply index to resume applying
             // after restart. Here we just ignore this because we use a Memory storage.
             _last_apply_index = entry.get_index();

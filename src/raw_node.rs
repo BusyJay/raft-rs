@@ -44,6 +44,7 @@ use super::read_only::ReadState;
 use super::Storage;
 use super::{Raft, SoftState, INVALID_ID};
 use super::{Status, StatusRef};
+use raft_log::Slice;
 
 /// Represents a Peer node in the cluster.
 #[derive(Debug, Default)]
@@ -114,7 +115,7 @@ pub struct Ready {
 
     /// Entries specifies entries to be saved to stable storage BEFORE
     /// Messages are sent.
-    pub entries: Vec<Entry>,
+    pub has_unstable: bool,
 
     /// Snapshot specifies the snapshot to be saved to stable storage.
     pub snapshot: Snapshot,
@@ -122,7 +123,7 @@ pub struct Ready {
     /// CommittedEntries specifies entries to be committed to a
     /// store/state-machine. These have previously been committed to stable
     /// store.
-    pub committed_entries: Option<Vec<Entry>>,
+    pub committed_entries: Option<Slice>,
 
     /// Messages specifies outbound messages to be sent AFTER Entries are
     /// committed to stable storage.
@@ -143,19 +144,16 @@ impl Ready {
         since_idx: Option<u64>,
     ) -> Ready {
         let mut rd = Ready {
-            entries: raft.raft_log.unstable_entries().unwrap_or(&[]).to_vec(),
+            has_unstable: raft.raft_log.unstable_entries().is_some(),
             ..Default::default()
         };
         if !raft.msgs.is_empty() {
             mem::swap(&mut raft.msgs, &mut rd.messages);
         }
-        rd.committed_entries = Some(
-            (match since_idx {
-                None => raft.raft_log.next_entries(),
-                Some(idx) => raft.raft_log.next_entries_since(idx),
-            })
-            .unwrap_or_else(Vec::new),
-        );
+        rd.committed_entries = match since_idx {
+            None => raft.raft_log.next_entries(),
+            Some(idx) => raft.raft_log.next_entries_since(idx),
+        };
         let ss = raft.soft_state();
         if &ss != prev_ss {
             rd.ss = Some(ss);
@@ -241,9 +239,8 @@ impl<T: Storage> RawNode<T> {
                 self.prev_hs = e;
             }
         }
-        if !rd.entries.is_empty() {
-            let e = rd.entries.last().unwrap();
-            self.raft.raft_log.stable_to(e.get_index(), e.get_term());
+        if rd.has_unstable {
+            self.raft.raft_log.stable_all();
         }
         if rd.snapshot != Snapshot::new() {
             self.raft

@@ -36,6 +36,27 @@ use util;
 
 pub use util::NO_LIMIT;
 
+/// Slice for raft log
+#[derive(Debug, PartialEq, Clone, Copy)]
+pub struct Slice {
+    /// Start of the slice, inclusive.
+    pub start: u64,
+    /// End of the slice, exclusive.
+    pub end: u64,
+}
+
+impl Slice {
+    /// Create a slice.
+    pub fn new(start: u64, end: u64) -> Slice {
+        Slice { start, end }
+    }
+
+    /// The length of the slice.
+    pub fn len(&self) -> u64 {
+        self.end - self.start
+    }
+}
+
 /// Raft log implementation
 #[derive(Default)]
 pub struct RaftLog<T: Storage> {
@@ -318,6 +339,11 @@ impl<T: Storage> RaftLog<T> {
         Some(&self.unstable.entries)
     }
 
+    /// Stable all unstable entries.
+    pub fn stable_all(&mut self) {
+        self.unstable.stable_all();
+    }
+
     /// Returns entries starting from a particular index and not exceeding a bytesize.
     pub fn entries(&self, idx: u64, max_size: u64) -> Result<Vec<Entry>> {
         let last = self.last_index();
@@ -353,22 +379,23 @@ impl<T: Storage> RaftLog<T> {
     }
 
     /// Returns any entries since the a particular index.
-    pub fn next_entries_since(&self, since_idx: u64) -> Option<Vec<Entry>> {
+    pub fn next_entries_since(&self, since_idx: u64) -> Option<Slice> {
         let offset = cmp::max(since_idx + 1, self.first_index());
         let committed = self.committed;
         if committed + 1 > offset {
-            match self.slice(offset, committed + 1, NO_LIMIT) {
-                Ok(vec) => return Some(vec),
-                Err(e) => panic!("{} {}", self.tag, e),
-            }
+            Some(Slice {
+                start: offset,
+                end: committed + 1,
+            })
+        } else {
+            None
         }
-        None
     }
 
     /// Returns all the available entries for execution.
     /// If applied is smaller than the index of snapshot, it returns all committed
     /// entries after the index of snapshot.
-    pub fn next_entries(&self) -> Option<Vec<Entry>> {
+    pub fn next_entries(&self) -> Option<Slice> {
         self.next_entries_since(self.applied)
     }
 
@@ -918,7 +945,9 @@ mod test {
             raft_log.maybe_commit(5, 1);
             raft_log.applied_to(applied);
 
-            let next_entries = raft_log.next_entries();
+            let next_entries = raft_log.next_entries().map(|s| {
+                raft_log.slice(s.start, s.end, crate::NO_LIMIT).unwrap()
+            });
             if next_entries != expect_entries.map(|n| n.to_vec()) {
                 panic!(
                     "#{}: next_entries = {:?}, want {:?}",

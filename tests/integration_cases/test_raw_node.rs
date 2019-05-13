@@ -59,15 +59,15 @@ fn conf_change(t: ConfChangeType, node_id: u64) -> ConfChange {
 fn new_ready(
     ss: Option<SoftState>,
     hs: Option<HardState>,
-    entries: Vec<Entry>,
-    committed_entries: Vec<Entry>,
+    has_unstable: bool,
+    committed_entries: Option<Slice>,
     must_sync: bool,
 ) -> Ready {
     Ready {
         ss: ss,
         hs: hs,
-        entries: entries,
-        committed_entries: Some(committed_entries),
+        has_unstable,
+        committed_entries,
         must_sync: must_sync,
         ..Default::default()
     }
@@ -180,7 +180,10 @@ fn test_raw_node_propose_and_conf_change() {
     let s = new_storage();
     let mut raw_node = new_raw_node(1, vec![], 10, 1, s.clone(), vec![new_peer(1)]);
     let rd = raw_node.ready();
-    s.wl().append(&rd.entries).expect("");
+    if rd.has_unstable {
+        let entries = raw_node.raft.raft_log.unstable_entries().unwrap().to_vec();
+        s.wl().append(&entries).expect("");
+    }
     raw_node.advance(rd);
     raw_node.campaign().expect("");
     let mut proposed = false;
@@ -188,7 +191,10 @@ fn test_raw_node_propose_and_conf_change() {
     let mut ccdata = vec![];
     loop {
         let rd = raw_node.ready();
-        s.wl().append(&rd.entries).expect("");
+        if rd.has_unstable {
+            let entries = raw_node.raft.raft_log.unstable_entries().unwrap().to_vec();
+            s.wl().append(&entries).expect("");
+        }
         // Once we are the leader, propose a command and a ConfChange.
         if !proposed && rd.ss.is_some() && rd.ss.as_ref().unwrap().leader_id == raw_node.raft.id {
             raw_node.propose(vec![], b"somedata".to_vec()).expect("");
@@ -224,13 +230,19 @@ fn test_raw_node_propose_add_duplicate_node() {
     let s = new_storage();
     let mut raw_node = new_raw_node(1, vec![], 10, 1, s.clone(), vec![new_peer(1)]);
     let rd = raw_node.ready();
-    s.wl().append(&rd.entries).expect("");
+    if rd.has_unstable {
+        let entries = raw_node.raft.raft_log.unstable_entries().unwrap().to_vec();
+        s.wl().append(&entries).expect("");
+    }
     raw_node.advance(rd);
 
     raw_node.campaign().expect("");
     loop {
         let rd = raw_node.ready();
-        s.wl().append(&rd.entries).expect("");
+        if rd.has_unstable {
+            let entries = raw_node.raft.raft_log.unstable_entries().unwrap().to_vec();
+            s.wl().append(&entries).expect("");
+        }
         if rd.ss.is_some() && rd.ss.as_ref().unwrap().leader_id == raw_node.raft.id {
             raw_node.advance(rd);
             break;
@@ -241,8 +253,15 @@ fn test_raw_node_propose_add_duplicate_node() {
     let mut propose_conf_change_and_apply = |cc| {
         raw_node.propose_conf_change(vec![], cc).expect("");
         let rd = raw_node.ready();
-        s.wl().append(&rd.entries).expect("");
-        for e in rd.committed_entries.as_ref().unwrap() {
+        if rd.has_unstable {
+            let entries = raw_node.raft.raft_log.unstable_entries().unwrap().to_vec();
+            s.wl().append(&entries).expect("");
+        }
+        let committed_entries = {
+            let s = rd.committed_entries.as_ref().unwrap();
+            raw_node.raft.raft_log.slice(s.start, s.end, NO_LIMIT).unwrap()
+        };
+        for e in &committed_entries {
             if e.get_entry_type() == EntryType::EntryConfChange {
                 let conf_change = protobuf::parse_from_bytes(e.get_data()).unwrap();
                 raw_node.apply_conf_change(&conf_change);
@@ -278,13 +297,19 @@ fn test_raw_node_propose_add_learner_node() {
     let s = new_storage();
     let mut raw_node = new_raw_node(1, vec![], 10, 1, s.clone(), vec![new_peer(1)]);
     let rd = raw_node.ready();
-    s.wl().append(&rd.entries).expect("");
+    if rd.has_unstable {
+        let entries = raw_node.raft.raft_log.unstable_entries().unwrap().to_vec();
+        s.wl().append(&entries).expect("");
+    }
     raw_node.advance(rd);
 
     raw_node.campaign().expect("");
     loop {
         let rd = raw_node.ready();
-        s.wl().append(&rd.entries).expect("");
+        if rd.has_unstable {
+            let entries = raw_node.raft.raft_log.unstable_entries().unwrap().to_vec();
+            s.wl().append(&entries).expect("");
+        }
         if rd.ss.is_some() && rd.ss.as_ref().unwrap().leader_id == raw_node.raft.id {
             raw_node.advance(rd);
             break;
@@ -297,14 +322,18 @@ fn test_raw_node_propose_add_learner_node() {
     raw_node.propose_conf_change(vec![], cc).expect("");
 
     let rd = raw_node.ready();
-    s.wl().append(&rd.entries).expect("");
+    if rd.has_unstable {
+        let entries = raw_node.raft.raft_log.unstable_entries().unwrap().to_vec();
+        s.wl().append(&entries).expect("");
+    }
 
     assert!(
         rd.committed_entries.is_some() && rd.committed_entries.as_ref().unwrap().len() == 1,
         "should committed the conf change entry"
     );
 
-    let e = &rd.committed_entries.as_ref().unwrap()[0];
+    let start_index = rd.committed_entries.as_ref().unwrap().start;
+    let e = raw_node.raft.raft_log.entries(start_index, 0).unwrap().pop().unwrap();
     let conf_change = protobuf::parse_from_bytes(e.get_data()).unwrap();
     let conf_state = raw_node.apply_conf_change(&conf_change);
     assert_eq!(conf_state.nodes, vec![1]);
@@ -325,12 +354,18 @@ fn test_raw_node_read_index() {
     let s = new_storage();
     let mut raw_node = new_raw_node(1, vec![], 10, 1, s.clone(), vec![new_peer(1)]);
     let rd = raw_node.ready();
-    s.wl().append(&rd.entries).expect("");
+    if rd.has_unstable {
+        let entries = raw_node.raft.raft_log.unstable_entries().unwrap().to_vec();
+        s.wl().append(&entries).expect("");
+    }
     raw_node.advance(rd);
     raw_node.campaign().expect("");
     loop {
         let rd = raw_node.ready();
-        s.wl().append(&rd.entries).expect("");
+        if rd.has_unstable {
+            let entries = raw_node.raft.raft_log.unstable_entries().unwrap().to_vec();
+            s.wl().append(&entries).expect("");
+        }
         if rd
             .ss
             .as_ref()
@@ -350,7 +385,10 @@ fn test_raw_node_read_index() {
     assert!(raw_node.has_ready());
     let rd = raw_node.ready();
     assert_eq!(rd.read_states, wrs);
-    s.wl().append(&rd.entries).expect("");
+    if rd.has_unstable {
+        let entries = raw_node.raft.raft_log.unstable_entries().unwrap().to_vec();
+        s.wl().append(&entries).expect("");
+    }
     raw_node.advance(rd);
 
     // ensure raft.read_states is reset after advance
@@ -367,53 +405,70 @@ fn test_raw_node_start() {
     let cc = conf_change(ConfChangeType::AddNode, 1);
     let ccdata = protobuf::Message::write_to_bytes(&cc).unwrap();
     let wants = vec![
-        new_ready(
+        (new_ready(
             None,
             Some(hard_state(1, 1, 0)),
-            vec![entry(
-                EntryType::EntryConfChange,
-                1,
-                1,
-                Some(ccdata.clone()),
-            )],
-            vec![entry(
-                EntryType::EntryConfChange,
-                1,
-                1,
-                Some(ccdata.clone()),
-            )],
             true,
-        ),
-        new_ready(
+            Some(Slice::new(1, 2)),
+            true,
+        ), vec![entry(
+                EntryType::EntryConfChange,
+                1,
+                1,
+                Some(ccdata.clone()),
+            )],
+            vec![entry(
+                EntryType::EntryConfChange,
+                1,
+                1,
+                Some(ccdata.clone()),
+            )]),
+        (new_ready(
             None,
             Some(hard_state(2, 3, 1)),
-            vec![new_entry(2, 3, Some("foo"))],
-            vec![new_entry(2, 3, Some("foo"))],
+            true,
+            Some(Slice::new(3, 4)),
             false,
         ),
+            vec![new_entry(2, 3, Some("foo"))],
+            vec![new_entry(2, 3, Some("foo"))],),
     ];
 
     let store = new_storage();
     let mut raw_node = new_raw_node(1, vec![], 10, 1, store.clone(), vec![new_peer(1)]);
     let rd = raw_node.ready();
     info!("rd {:?}", &rd);
-    assert_eq!(rd, wants[0]);
-    store.wl().append(&rd.entries).expect("");
+    assert_eq!(rd, wants[0].0);
+    if rd.has_unstable {
+        let entries = raw_node.raft.raft_log.unstable_entries().unwrap().to_vec();
+        assert_eq!(entries, wants[0].1);
+        store.wl().append(&entries).expect("");
+    }
     raw_node.advance(rd);
 
     let rd = raw_node.ready();
-    store.wl().append(&rd.entries).expect("");
+    if rd.has_unstable {
+        let entries = raw_node.raft.raft_log.unstable_entries().unwrap().to_vec();
+        store.wl().append(&entries).expect("");
+    }
     raw_node.advance(rd);
 
     raw_node.campaign().expect("");
     let rd = raw_node.ready();
-    store.wl().append(&rd.entries).expect("");
+    if rd.has_unstable {
+        let entries = raw_node.raft.raft_log.unstable_entries().unwrap().to_vec();
+        store.wl().append(&entries).expect("");
+    }
     raw_node.advance(rd);
 
     raw_node.propose(vec![], b"foo".to_vec()).expect("");
     let rd = raw_node.ready();
-    assert_eq!(rd, wants[1]);
-    store.wl().append(&rd.entries).expect("");
+    assert_eq!(rd, wants[1].0);
+    if rd.has_unstable {
+        let entries = raw_node.raft.raft_log.unstable_entries().unwrap().to_vec();
+        assert_eq!(entries, wants[1].1);
+        store.wl().append(&entries).expect("");
+    }
     raw_node.advance(rd);
     assert!(!raw_node.has_ready());
 }
@@ -424,7 +479,7 @@ fn test_raw_node_restart() {
     let entries = vec![empty_entry(1, 1), new_entry(1, 2, Some("foo"))];
     let st = hard_state(1, 1, 0);
 
-    let want = new_ready(None, None, vec![], entries[..1].to_vec(), false);
+    let want = new_ready(None, None, false, Some(Slice::new(1, 2)), false);
 
     let store = new_storage();
     store.wl().set_hardstate(st);
@@ -443,7 +498,7 @@ fn test_raw_node_restart_from_snapshot() {
     let entries = vec![new_entry(1, 3, Some("foo"))];
     let st = hard_state(1, 3, 0);
 
-    let want = new_ready(None, None, vec![], entries.clone(), false);
+    let want = new_ready(None, None, false, Some(Slice::new(3, 4)), false);
 
     let s = new_storage();
     s.wl().set_hardstate(st);
