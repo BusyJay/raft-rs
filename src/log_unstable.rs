@@ -146,14 +146,14 @@ impl Unstable {
             return;
         }
         let index = self.offset + self.entries.len() as u64 - MAX_CACHE_CAPACITY as u64;
-        if index < self.stable_index {
+        if index <= self.stable_index {
             self.compact_to(index);
         }
     }
 
     /// TODO
     pub fn compact_to(&mut self, idx: u64) {
-        if idx >= self.stable_index {
+        if idx > self.stable_index {
             panic!("{} unstable logs should not be cleared: {} >= {}", self.tag, idx, self.stable_index);
         }
         if self.offset >= idx {
