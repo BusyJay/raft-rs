@@ -86,8 +86,14 @@ fn voted_with_config(vote: u64, term: u64, pre_vote: bool) -> Interface {
 }
 
 fn next_ents(r: &mut Raft<MemStorage>, s: &MemStorage) -> Vec<Entry> {
+    let entries = {
+    let (l, right) = r.raft_log.unstable_entries().unwrap_or_else(|| (&[], &[]));
+    let mut entries = l.to_vec();
+    entries.extend_from_slice(right);
+    entries
+    };
     s.wl()
-        .append(r.raft_log.unstable_entries().unwrap_or(&[]))
+        .append(&entries)
         .expect("");
     let (last_idx, last_term) = (r.raft_log.last_index(), r.raft_log.last_term());
     r.raft_log.stable_to(last_idx, last_term);
@@ -111,10 +117,7 @@ fn new_raft_log(ents: &[Entry], offset: u64, committed: u64) -> RaftLog<MemStora
     store.wl().append(ents).expect("");
     RaftLog {
         store: store,
-        unstable: Unstable {
-            offset: offset,
-            ..Default::default()
-        },
+        unstable: Unstable::new(offset, "".to_owned()),
         committed: committed,
         ..Default::default()
     }
@@ -1233,7 +1236,7 @@ fn test_handle_msg_append() {
         let mut sm = new_test_raft(1, vec![1], 10, 1, store);
         sm.become_follower(2, INVALID_ID);
 
-        sm.handle_append_entries(&m);
+        sm.handle_append_entries(m);
         if sm.raft_log.last_index() != w_index {
             panic!(
                 "#{}: last_index = {}, want {}",
@@ -2250,6 +2253,8 @@ fn test_read_only_with_learner() {
             vec![e],
         )]);
 
+        info!("id {}", id);
+
         let read_states: Vec<ReadState> = nt
             .peers
             .get_mut(&id)
@@ -2548,7 +2553,7 @@ fn test_bcast_beat() {
     sm.become_candidate();
     sm.become_leader();
     for i in 0..10 {
-        sm.append_entry(&mut [empty_entry(0, i as u64 + 1)]);
+        sm.append_entry(vec![empty_entry(0, i as u64 + 1)]);
     }
     // slow follower
     let mut_pr = |sm: &mut Interface, n, matched, next_idx| {
@@ -2662,7 +2667,7 @@ fn test_leader_increase_next() {
     ];
     for (i, (state, next_idx, wnext)) in tests.drain(..).enumerate() {
         let mut sm = new_test_raft(1, vec![1, 2], 10, 1, new_storage());
-        sm.raft_log.append(&previous_ents);
+        sm.raft_log.append(previous_ents.clone(), 0);
         sm.become_candidate();
         sm.become_leader();
         sm.mut_prs().get_mut(2).unwrap().state = state;
@@ -2696,7 +2701,7 @@ fn test_send_append_for_progress_probe() {
             // we expect that raft will only send out one msgAPP on the first
             // loop. After that, the follower is paused until a heartbeat response is
             // received.
-            r.append_entry(&mut [new_entry(0, 0, SOME_DATA)]);
+            r.append_entry(vec![new_entry(0, 0, SOME_DATA)]);
             do_send_append(&mut r, 2);
             let msg = r.read_messages();
             assert_eq!(msg.len(), 1);
@@ -2705,7 +2710,7 @@ fn test_send_append_for_progress_probe() {
 
         assert!(r.prs().voters()[&2].paused);
         for _ in 0..10 {
-            r.append_entry(&mut [new_entry(0, 0, SOME_DATA)]);
+            r.append_entry(vec![new_entry(0, 0, SOME_DATA)]);
             do_send_append(&mut r, 2);
             assert_eq!(r.read_messages().len(), 0);
         }
@@ -2742,7 +2747,7 @@ fn test_send_append_for_progress_replicate() {
     r.mut_prs().get_mut(2).unwrap().become_replicate();
 
     for _ in 0..10 {
-        r.append_entry(&mut [new_entry(0, 0, SOME_DATA)]);
+        r.append_entry(vec![new_entry(0, 0, SOME_DATA)]);
         do_send_append(&mut r, 2);
         assert_eq!(r.read_messages().len(), 1);
     }
@@ -2758,7 +2763,7 @@ fn test_send_append_for_progress_snapshot() {
     r.mut_prs().get_mut(2).unwrap().become_snapshot(10);
 
     for _ in 0..10 {
-        r.append_entry(&mut [new_entry(0, 0, SOME_DATA)]);
+        r.append_entry(vec![new_entry(0, 0, SOME_DATA)]);
         do_send_append(&mut r, 2);
         assert_eq!(r.read_messages().len(), 0);
     }
@@ -2815,7 +2820,7 @@ fn test_restore_ignore_snapshot() {
     let previous_ents = vec![empty_entry(1, 1), empty_entry(1, 2), empty_entry(1, 3)];
     let commit = 1u64;
     let mut sm = new_test_raft(1, vec![1, 2], 10, 1, new_storage());
-    sm.raft_log.append(&previous_ents);
+    sm.raft_log.append(previous_ents, 0);
     sm.raft_log.commit_to(commit);
 
     let mut s = new_snapshot(commit, 1, vec![1, 2]);
@@ -2992,7 +2997,7 @@ fn test_new_leader_pending_config() {
         let mut e = Entry::new();
         if add_entry {
             e.set_entry_type(EntryType::EntryNormal);
-            r.append_entry(&mut [e]);
+            r.append_entry(vec![e]);
         }
         r.become_candidate();
         r.become_leader();

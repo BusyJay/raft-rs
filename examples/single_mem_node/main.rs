@@ -136,8 +136,9 @@ fn on_ready(r: &mut RawNode<MemStorage>, cbs: &mut HashMap<u8, ProposeCallback>)
 
     if ready.unstable_count > 0 {
         // Append entries to the Raft log
-        let entries = r.raft.raft_log.unstable_entries().unwrap();
-        r.raft.raft_log.store.wl().append(entries).unwrap();
+        let (l, right) = r.raft.raft_log.unstable_entries().unwrap();
+        r.raft.raft_log.store.wl().append(l).unwrap();
+        r.raft.raft_log.store.wl().append(right).unwrap();
     }
 
     if let Some(ref hs) = ready.hs {

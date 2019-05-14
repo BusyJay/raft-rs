@@ -44,8 +44,13 @@ fn commit_noop_entry(r: &mut Interface, s: &MemStorage) {
     }
     // ignore further messages to refresh followers' commit index
     r.read_messages();
+    let e = r.raft_log.unstable_entries().map_or_else(Vec::new, |(l, r)| {
+        let mut v = l.to_vec();
+        v.extend_from_slice(r);
+        v
+    });
     s.wl()
-        .append(r.raft_log.unstable_entries().unwrap_or(&[]))
+        .append(&e)
         .expect("");
     let committed = r.raft_log.committed;
     r.raft_log.applied_to(committed);
@@ -126,7 +131,7 @@ fn test_leader_bcast_beat() {
     r.become_candidate();
     r.become_leader();
     for i in 0..10 {
-        r.append_entry(&mut [empty_entry(0, i as u64 + 1)]);
+        r.append_entry(vec![empty_entry(0, i as u64 + 1)]);
     }
 
     for _ in 0..hi {
@@ -463,7 +468,12 @@ fn test_leader_start_replication() {
         new_message_ext(1, 3, wents.clone()),
     ];
     assert_eq!(msgs, expect_msgs);
-    assert_eq!(r.raft_log.unstable_entries(), Some(&*wents));
+    let res = r.raft_log.unstable_entries().map(|(l, r)| {
+        let mut v = l.to_vec();
+        v.extend_from_slice(r);
+        v
+    });
+    assert_eq!(res, Some(wents));
 }
 
 // test_leader_commit_entry tests that when the entry has been safely replicated,
@@ -630,11 +640,10 @@ fn test_follower_commit_entry() {
                 i, r.raft_log.committed, commit
             );
         }
-        let wents = Some(ents[..commit as usize].to_vec());
         let g = r.raft_log.next_entries();
-        let wg = Slice::new(ents[0].get_index(), ents[commit as usize].get_index() + 1);
+        let wg = Slice::new(ents[0].get_index(), ents[commit as usize - 1].get_index() + 1);
         if g != Some(wg) {
-            panic!("#{}: next_ents = {:?}, want {:?}", i, g, wents);
+            panic!("#{}: next_ents = {:?}, want {:?}", i, g, wg);
         }
     }
 }
@@ -756,11 +765,15 @@ fn test_follower_append_entries() {
         if g != wents {
             panic!("#{}: ents = {:?}, want {:?}", i, g, wents);
         }
-        let g = r.raft_log.unstable_entries();
+        let g = r.raft_log.unstable_entries().map(|(l, r)| {
+            let mut v = l.to_vec();
+            v.extend_from_slice(r);
+            v
+        });
         let wunstable = if wunstable.is_empty() {
             None
         } else {
-            Some(&*wunstable)
+            Some(wunstable)
         };
         if g != wunstable {
             panic!("#{}: unstable_entries = {:?}, want {:?}", i, g, wunstable);

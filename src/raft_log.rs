@@ -316,7 +316,7 @@ impl<T: Storage> RaftLog<T> {
 
     /// Appends a set of entries to the unstable list.
     pub fn append(&mut self, ents: Vec<Entry>, index: usize) -> u64 {
-        if ents.len() >= index {
+        if ents.len() <= index {
             return self.last_index();
         }
 
@@ -337,11 +337,6 @@ impl<T: Storage> RaftLog<T> {
             return None;
         }
         Some(self.unstable.unstable_entries())
-    }
-
-    /// Stable all unstable entries.
-    pub fn stable_all(&mut self) {
-        self.unstable.stable_all();
     }
 
     /// Returns entries starting from a particular index and not exceeding a bytesize.
@@ -592,7 +587,7 @@ mod test {
         for (i, &(ref ents, wconflict)) in tests.iter().enumerate() {
             let store = MemStorage::new();
             let mut raft_log = new_raft_log(store);
-            raft_log.append(&previous_ents, 0);
+            raft_log.append(previous_ents.clone(), 0);
             let gconflict = raft_log.find_conflict(ents);
             if gconflict != wconflict {
                 panic!("#{}: conflict = {}, want {}", i, gconflict, wconflict)
@@ -606,7 +601,7 @@ mod test {
         let previous_ents = vec![new_entry(1, 1), new_entry(2, 2), new_entry(3, 3)];
         let store = MemStorage::new();
         let mut raft_log = new_raft_log(store);
-        raft_log.append(&previous_ents, 0);
+        raft_log.append(previous_ents, 0);
         let tests = vec![
             // greater term, ignore lastIndex
             (raft_log.last_index() - 1, 4, true),
@@ -651,7 +646,7 @@ mod test {
                 2,
             ),
         ];
-        for (i, &(ref ents, windex, ref wents, wunstable)) in tests.iter().enumerate() {
+        for (i, (ents, windex, wents, wunstable)) in tests.into_iter().enumerate() {
             let store = MemStorage::new();
             store.wl().append(&previous_ents).expect("append failed");
             let mut raft_log = new_raft_log(store);
@@ -661,9 +656,9 @@ mod test {
             }
             match raft_log.entries(1, raft_log::NO_LIMIT) {
                 Err(e) => panic!("#{}: unexpected error {}", i, e),
-                Ok(ref g) if g != wents => panic!("#{}: logEnts = {:?}, want {:?}", i, &g, &wents),
+                Ok(ref g) if *g != wents => panic!("#{}: logEnts = {:?}, want {:?}", i, &g, &wents),
                 _ => {
-                    let goff = raft_log.unstable.offset;
+                    let goff = raft_log.unstable.unstable_offset();
                     if goff != wunstable {
                         panic!("#{}: unstable = {}, want {}", i, goff, wunstable);
                     }
@@ -856,7 +851,7 @@ mod test {
             ),
         ];
 
-        for (i, (stablei, stablet, new_ents, wunstable)) in tests.drain(..).enumerate() {
+        for (i, (stablei, stablet, new_ents, wunstable)) in tests.into_iter().enumerate() {
             let store = MemStorage::new();
             store
                 .wl()
@@ -900,7 +895,7 @@ mod test {
         let previous_ents = vec![new_entry(1, 1), new_entry(2, 2)];
         let tests = vec![(3, vec![]), (1, previous_ents.clone())];
 
-        for (i, &(unstable, ref wents)) in tests.iter().enumerate() {
+        for (i, (unstable, wents)) in tests.into_iter().enumerate() {
             // append stable entries to storage
             let store = MemStorage::new();
             store
@@ -912,15 +907,20 @@ mod test {
             let mut raft_log = new_raft_log(store);
             raft_log.append(previous_ents.clone(), unstable - 1);
 
-            let ents = raft_log.unstable_entries().unwrap_or((&[], &[]));
-            if !ents.0.is_empty() {
-                raft_log.stable_to(ents[l - 1].get_index(), ents[l - i].get_term());
+            let ents = raft_log.unstable_entries().map_or_else(Vec::default, |(l, r)| {
+                let mut e = l.to_vec();
+                e.extend_from_slice(r);
+                e
+            });
+            if !ents.is_empty() {
+                let l = ents.last().unwrap();
+                raft_log.stable_to(l.get_index(), l.get_term());
             }
-            if &ents != wents {
+            if ents != wents {
                 panic!("#{}: unstableEnts = {:?}, want {:?}", i, ents, wents);
             }
             let w = previous_ents[previous_ents.len() - 1].get_index() + 1;
-            let g = raft_log.unstable.offset;
+            let g = raft_log.unstable.unstable_offset();
             if g != w {
                 panic!("#{}: unstable = {}, want {}", i, g, w);
             }
@@ -930,7 +930,7 @@ mod test {
     #[test]
     fn test_next_ents() {
         setup_for_test();
-        let ents = [new_entry(4, 1), new_entry(5, 1), new_entry(6, 1)];
+        let ents = vec![new_entry(4, 1), new_entry(5, 1), new_entry(6, 1)];
         let tests = vec![
             (0, Some(&ents[..2])),
             (3, Some(&ents[..2])),
@@ -941,7 +941,7 @@ mod test {
             let store = MemStorage::new();
             store.wl().apply_snapshot(new_snapshot(3, 1)).expect("");
             let mut raft_log = new_raft_log(store);
-            raft_log.append(&ents);
+            raft_log.append(ents.clone(), 0);
             raft_log.maybe_commit(5, 1);
             raft_log.applied_to(applied);
 
@@ -960,14 +960,14 @@ mod test {
     #[test]
     fn test_has_next_ents() {
         setup_for_test();
-        let ents = [new_entry(4, 1), new_entry(5, 1), new_entry(6, 1)];
+        let ents = vec![new_entry(4, 1), new_entry(5, 1), new_entry(6, 1)];
         let tests = vec![(0, true), (3, true), (4, true), (5, false)];
 
         for (i, &(applied, has_next)) in tests.iter().enumerate() {
             let store = MemStorage::new();
             store.wl().apply_snapshot(new_snapshot(3, 1)).expect("");
             let mut raft_log = new_raft_log(store);
-            raft_log.append(&ents);
+            raft_log.append(ents.clone(), 0);
             raft_log.maybe_commit(5, 1);
             raft_log.applied_to(applied);
 
@@ -999,7 +999,7 @@ mod test {
         }
         let mut raft_log = new_raft_log(store);
         for i in (num / 2)..num {
-            raft_log.append(&[new_entry(offset + i, offset + i)]);
+            raft_log.append(vec![new_entry(offset + i, offset + i)], 0);
         }
 
         let tests = vec![
@@ -1257,15 +1257,15 @@ mod test {
             ),
         ];
 
-        for (i, &(log_term, index, committed, ref ents, wlasti, wcommit, wpanic)) in
-            tests.iter().enumerate()
+        for (i, (log_term, index, committed, ents, wlasti, wcommit, wpanic)) in
+            tests.into_iter().enumerate()
         {
             let store = MemStorage::new();
             let mut raft_log = new_raft_log(store);
-            raft_log.append(&previous_ents);
+            raft_log.append(previous_ents.clone(), 0);
             raft_log.committed = commit;
             let res = panic::catch_unwind(AssertUnwindSafe(|| {
-                raft_log.maybe_append(index, log_term, committed, ents)
+                raft_log.maybe_append(index, log_term, committed, ents.to_vec())
             }));
             if res.is_err() ^ wpanic {
                 panic!("#{}: panic = {}, want {}", i, res.is_err(), wpanic);
@@ -1288,7 +1288,7 @@ mod test {
                     raft_log.last_index() + 1,
                 );
                 let gents = raft_log.slice(from, to, raft_log::NO_LIMIT).expect("");
-                if &gents != ents {
+                if gents != ents {
                     panic!("#{}: appended entries = {:?}, want {:?}", i, gents, ents);
                 }
             }
@@ -1308,7 +1308,7 @@ mod test {
         for (i, &(commit, wcommit, wpanic)) in tests.iter().enumerate() {
             let store = MemStorage::new();
             let mut raft_log = new_raft_log(store);
-            raft_log.append(&previous_ents);
+            raft_log.append(previous_ents.clone(), 0);
             raft_log.committed = previous_commit;
             let has_panic =
                 panic::catch_unwind(AssertUnwindSafe(|| raft_log.commit_to(commit))).is_err();
@@ -1384,7 +1384,7 @@ mod test {
             .expect("");
         let mut raft_log = new_raft_log(store);
         for i in 1u64..(num + 1) {
-            raft_log.append(&[new_entry(i + offset, 0)]);
+            raft_log.append(vec![new_entry(i + offset, 0)], 0);
         }
         let first = offset + 1;
         let tests = vec![

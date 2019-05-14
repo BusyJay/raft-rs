@@ -166,11 +166,6 @@ impl Unstable {
         }
     }
 
-    /// Stable all entries.
-    pub fn stable_all(&mut self) {
-        self.stable_index = self.offset + self.entries.len() as u64;
-    }
-
     /// Removes the snapshot from self if the index of the snapshot matches
     pub fn stable_snap_to(&mut self, idx: u64) {
         if self.snapshot.is_none() {
@@ -297,6 +292,7 @@ mod test {
             entries.map(|e| ent.push_back(e));
             let u = Unstable {
                 entries: ent,
+                stable_index: offset,
                 offset,
                 snapshot,
                 ..Default::default()
@@ -327,6 +323,7 @@ mod test {
             entries.map(|e| ent.push_back(e));
             let u = Unstable {
                 entries: ent,
+                stable_index: offset,
                 offset,
                 snapshot,
                 ..Default::default()
@@ -391,6 +388,7 @@ mod test {
             entries.map(|e| ent.push_back(e));
             let u = Unstable {
                 entries: ent,
+                stable_index: offset,
                 offset,
                 snapshot,
                 ..Default::default()
@@ -410,6 +408,7 @@ mod test {
         ent.push_back(new_entry(5, 1));
         let mut u = Unstable {
             entries: ent,
+            stable_index: 5,
             offset: 5,
             snapshot: Some(new_snapshot(4, 1)),
             ..Default::default()
@@ -490,18 +489,19 @@ mod test {
             ),
         ];
 
-        for (entries, offset, snapshot, index, term, woffset, wlen) in tests {
+        for (i, (entries, offset, snapshot, index, term, woffset, wlen)) in tests.into_iter().enumerate() {
             let mut ent = VecDeque::new();
             ent.extend(entries);
             let mut u = Unstable {
                 entries: ent,
+                stable_index: offset,
                 offset,
                 snapshot,
                 ..Default::default()
             };
             u.stable_to(index, term);
-            assert_eq!(u.offset, woffset);
-            assert_eq!(u.entries.len(), wlen);
+            assert_eq!(u.unstable_offset(), woffset, "#{}: ", i);
+            assert_eq!(u.unstable_len(), wlen, "#{}: ", i);
         }
     }
 
@@ -565,11 +565,12 @@ mod test {
             ent.extend(entries);
             let mut u = Unstable {
                 entries: ent,
+                stable_index: offset,
                 offset,
                 snapshot,
                 ..Default::default()
             };
-            u.truncate_and_append(to_append);
+            u.truncate_and_append(to_append, 0);
             assert_eq!(u.offset, woffset);
             assert_eq!(u.entries, wentries);
         }

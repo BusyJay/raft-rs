@@ -215,8 +215,9 @@ impl<T: Storage> RawNode<T> {
                 e.set_data(data);
                 ents.push(e);
             }
-            rn.raft.raft_log.committed = ents.len() as u64;
+            let ents_len = ents.len() as u64;
             rn.raft.raft_log.append(ents, 0);
+            rn.raft.raft_log.committed = ents_len;
             for peer in peers {
                 rn.raft.add_node(peer.id);
             }
@@ -240,7 +241,10 @@ impl<T: Storage> RawNode<T> {
             }
         }
         if rd.unstable_count > 0 {
-            self.raft.raft_log.stable_all();
+            let stable_index = self.raft.raft_log.unstable.unstable_offset() + rd.unstable_count as u64 - 1;
+            // TODO: what if logs change?
+            let stable_term = self.raft.raft_log.term(stable_index).unwrap();
+            self.raft.raft_log.stable_to(stable_index, stable_term);
         }
         if rd.snapshot != Snapshot::new() {
             self.raft
