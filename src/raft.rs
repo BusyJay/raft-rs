@@ -2363,6 +2363,7 @@ impl<T: Storage> Raft<T> {
             .get_voters()
             .iter()
             .chain(cs.get_learners())
+            .chain(cs.get_voters_outgoing())
             .all(|id| *id != self.id)
         {
             warn!(self.logger, "attempted to restore snapshot but it is not in the ConfState"; "conf_state" => ?cs);
